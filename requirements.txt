@@ -1,4 +1,4 @@
-python-telegram-bot==20.7
+python-telegram-bot==21.10
 garminconnect==0.2.10
 groq==0.11.0
-pydub==0.25.1
+requests==2.31.0
