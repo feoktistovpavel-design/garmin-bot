@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from groq import Groq
+import google.generativeai as genai
 from garminconnect import Garmin
 
 # Логирование
@@ -14,14 +14,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GARMIN_EMAIL = os.environ.get("GARMIN_EMAIL")
 GARMIN_PASSWORD = os.environ.get("GARMIN_PASSWORD")
 PORT = int(os.environ.get("PORT", 10000))
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# --- ЗАГЛУШКА ДЛЯ RENDER (чтобы не отключал бота) ---
+# --- ЗАГЛУШКА ДЛЯ RENDER ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -33,8 +34,8 @@ def run_dummy_server():
     server.serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
-# ---------------------------------------------------
 
+# --- ПОДКЛЮЧЕНИЕ К GARMIN ---
 def get_garmin_client():
     client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
     client.login()
@@ -42,10 +43,9 @@ def get_garmin_client():
 
 # --- СБОРКА GARMIN JSON ---
 def build_garmin_workout(parsed_json):
-    """Превращает простой ответ от LLM в сложный формат Garmin API"""
     workout = {
         "sport": "RUNNING",
-        "workoutName": parsed_json["workoutName"],
+        "workoutName": parsed_json.get("workoutName", "Тренировка"),
         "workoutSegments": [{"segmentOrder": 1, "sport": "RUNNING", "workoutSteps": []}]
     }
     
@@ -70,7 +70,6 @@ def build_garmin_workout(parsed_json):
             "targetValueTwo": None
         }
         
-        # Настройка целей (Пульс или Темп)
         t_type = step_data.get("target_type")
         if t_type == "hr":
             step["targetType"] = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.bpm"}
@@ -80,9 +79,8 @@ def build_garmin_workout(parsed_json):
             step["targetType"] = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"}
             sec_low = step_data.get("target_low_sec")
             sec_high = step_data.get("target_high_sec")
-            # Перевод секунд на километр в метры в секунду для Garmin
-            if sec_high: step["targetValueOne"] = round(1000.0 / sec_high, 3) # Медленная граница
-            if sec_low: step["targetValueTwo"] = round(1000.0 / sec_low, 3)   # Быстрая граница
+            if sec_high: step["targetValueOne"] = round(1000.0 / sec_high, 3)
+            if sec_low: step["targetValueTwo"] = round(1000.0 / sec_low, 3)
             
         return step
 
@@ -107,7 +105,6 @@ def build_garmin_workout(parsed_json):
 
 # --- ОТПРАВКА В GARMIN ---
 def save_and_schedule(garmin, workout_json, scheduled_date):
-    # Прямой и самый надежный запрос в Garmin API
     resp = garmin.garth.client.post("connectapi", "/workout-service/workout", json=workout_json)
     workout_id = resp.get("workoutId") if isinstance(resp, dict) else resp.json().get("workoutId")
     
@@ -116,37 +113,20 @@ def save_and_schedule(garmin, workout_json, scheduled_date):
     return workout_id
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я готов. Надиктуй тренировку (например: 'Завтра бежим 100 минут с пульсом 165-175, добавь разминку 5 минут').")
+    await update.message.reply_text("Привет! Я на связи через Gemini. Надиктуй тренировку или напиши текстом.")
 
 async def process_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("⏳ Думаю...")
     
     try:
-        if update.message.voice:
-            file = await context.bot.get_file(update.message.voice.file_id)
-            voice_path = "voice.ogg"
-            await file.download_to_drive(voice_path)
-            
-            with open(voice_path, "rb") as audio_file:
-                transcription = groq_client.audio.transcriptions.create(
-                    file=(voice_path, audio_file.read()),
-                    model="whisper-large-v3-turbo",
-                    language="ru"
-                )
-            text_prompt = transcription.text
-            os.remove(voice_path)
-            await status_msg.edit_text(f"🗣 Распознано: «{text_prompt}»\n\nРазбираю структуру...")
-        else:
-            text_prompt = update.message.text
-
-        # Получаем правильное время по часовому поясу пользователя (UTC+5)
+        # Устанавливаем часовой пояс Астаны/Ташкента (UTC+5) для точных дат
         tz = timezone(timedelta(hours=5))
         now = datetime.now(tz)
         today_str = now.strftime("%Y-%m-%d")
         
         system_prompt = f"""
 Ты — продвинутый ассистент бегуна. Сегодняшняя дата: {today_str} (UTC+5).
-Проанализируй запрос и верни СТРОГО JSON без лишних слов.
+Проанализируй текст или аудио и верни СТРОГО JSON без лишних слов.
 
 Формат JSON:
 {{
@@ -154,11 +134,10 @@ async def process_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TY
   "scheduledDate": "YYYY-MM-DD или null",
   "steps": [
     // Шаги могут быть типа "warmup", "active", "recovery", "cooldown" или "repeat"
-    // Если просят разминку/заминку, обязательно добавляй warmup/cooldown.
   ]
 }}
 
-Пример обычного шага (duration_type: "time" или "distance"):
+Пример обычного шага:
 {{"type": "active", "duration_type": "time", "duration_value": 6000, "target_type": "hr", "target_low": 165, "target_high": 175}}
 
 Пример интервалов (repeat):
@@ -172,30 +151,37 @@ async def process_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TY
 Правила перевода значений:
 1. duration_value: время всегда в секундах (100 мин = 6000, 5 мин = 300). Дистанция всегда в метрах.
 2. target_type: может быть "none", "hr" или "pace".
-3. Для пульса (hr): указывай target_low (нижний порог) и target_high (верхний порог). Если сказано "до 170", ставь target_low=0, target_high=170.
-4. Для темпа (pace): переведи целевой темп в секунды/км. Например, темп 5:00 = 300 сек, 5:20 = 320 сек. Укажи их в "target_low_sec" и "target_high_sec".
+3. Для пульса (hr): указывай target_low и target_high. Если сказано "до 170", ставь target_low=0, target_high=170.
+4. Для темпа (pace): переведи темп в секунды/км (напр. 5:00 = 300). Укажи их в "target_low_sec" и "target_high_sec".
 5. Даты: "завтра", "послезавтра", "21 октября" переводи в YYYY-MM-DD относительно {today_str}.
 """
 
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text_prompt}
-            ],
-            model="mixtral-8x7b-32768",
-            response_format={"type": "json_object"}
-        )
+        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+
+        if update.message.voice:
+            file = await context.bot.get_file(update.message.voice.file_id)
+            voice_path = "voice.ogg"
+            await file.download_to_drive(voice_path)
+            
+            # Отправляем аудиофайл напрямую в Gemini
+            audio_file = genai.upload_file(path=voice_path)
+            response = model.generate_content([system_prompt, audio_file])
+            
+            audio_file.delete()
+            os.remove(voice_path)
+            await status_msg.edit_text("🗣 Голос распознан Gemini!\n\nФормирую структуру тренировки...")
+        else:
+            text_prompt = update.message.text
+            response = model.generate_content([system_prompt, text_prompt])
         
-        parsed_result = json.loads(chat_completion.choices[0].message.content)
+        parsed_result = json.loads(response.text)
         scheduled_date = parsed_result.get("scheduledDate")
         
-        # Переводим простой JSON в монструозный формат Garmin
         garmin_payload = build_garmin_workout(parsed_result)
         
         await status_msg.edit_text("🔄 Отправляю в Garmin Connect...")
         garmin = get_garmin_client()
         
-        # Отправляем и ставим в календарь
         save_and_schedule(garmin, garmin_payload, scheduled_date)
         
         reply_text = f"✅ Тренировка «{parsed_result.get('workoutName')}» успешно создана!"
