@@ -1,4 +1,5 @@
 python-telegram-bot==21.10
-garminconnect>=0.2.18
+garminconnect>=0.3.2
+garth
 google-generativeai>=0.8.0
 requests==2.31.0
