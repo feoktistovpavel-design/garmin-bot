@@ -156,7 +156,7 @@ async def process_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TY
 5. Даты: "завтра", "послезавтра", "21 октября" переводи в YYYY-MM-DD относительно {today_str}.
 """
 
-        model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+        model = genai.GenerativeModel('gemini-3.8-flash', generation_config={"response_mime_type": "application/json"})
 
         if update.message.voice:
             file = await context.bot.get_file(update.message.voice.file_id)
