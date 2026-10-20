@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
+import garth
 from garminconnect import Garmin
 
 # Логирование
@@ -105,14 +106,16 @@ def build_garmin_workout(parsed_json):
 
 # --- ОТПРАВКА В GARMIN ---
 def save_and_schedule(garmin, workout_json, scheduled_date):
-    # Используем официальные встроенные методы свежей версии garminconnect
-    created_workout = garmin.create_workout(workout_json)
+    # Делаем прямой запрос в API через внутренний авторизованный движок garth
+    resp = garth.client.post("connectapi", "/workout-service/workout", json=workout_json)
     
-    # Garmin может вернуть либо готовый ID (число/строка), либо словарь
-    workout_id = created_workout.get("workoutId") if isinstance(created_workout, dict) else created_workout
+    # garth.client.post сам возвращает готовый словарь (JSON), достаем ID
+    workout_id = resp.get("workoutId") if isinstance(resp, dict) else resp.json().get("workoutId")
     
     if scheduled_date and workout_id:
-        garmin.schedule_workout(workout_id, scheduled_date)
+        # Прямым запросом ставим тренировку в календарь
+        garth.client.post("connectapi", f"/workout-service/schedule/{workout_id}", json={"date": scheduled_date})
+        
     return workout_id
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
