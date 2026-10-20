@@ -182,7 +182,7 @@ async def process_voice_or_text(update: Update, context: ContextTypes.DEFAULT_TY
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text_prompt}
             ],
-            model="llama3-70b-8192",
+            model="llama-3.1-70b-versatile",
             response_format={"type": "json_object"}
         )
         
