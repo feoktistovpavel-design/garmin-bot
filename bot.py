@@ -105,11 +105,14 @@ def build_garmin_workout(parsed_json):
 
 # --- ОТПРАВКА В GARMIN ---
 def save_and_schedule(garmin, workout_json, scheduled_date):
-    resp = garmin.garth.client.post("connectapi", "/workout-service/workout", json=workout_json)
-    workout_id = resp.get("workoutId") if isinstance(resp, dict) else resp.json().get("workoutId")
+    # Используем официальные встроенные методы свежей версии garminconnect
+    created_workout = garmin.create_workout(workout_json)
+    
+    # Garmin может вернуть либо готовый ID (число/строка), либо словарь
+    workout_id = created_workout.get("workoutId") if isinstance(created_workout, dict) else created_workout
     
     if scheduled_date and workout_id:
-        garmin.garth.client.post("connectapi", f"/workout-service/schedule/{workout_id}", json={"date": scheduled_date})
+        garmin.schedule_workout(workout_id, scheduled_date)
     return workout_id
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
