@@ -7,7 +7,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
-import garth
 from garminconnect import Garmin
 
 # Логирование
@@ -106,15 +105,31 @@ def build_garmin_workout(parsed_json):
 
 # --- ОТПРАВКА В GARMIN ---
 def save_and_schedule(garmin, workout_json, scheduled_date):
-    # Делаем прямой запрос в API через внутренний авторизованный движок garth
-    resp = garth.client.post("connectapi", "/workout-service/workout", json=workout_json)
+    url = "https://connectapi.garmin.com/workout-service/workout"
     
-    # garth.client.post сам возвращает готовый словарь (JSON), достаем ID
-    workout_id = resp.get("workoutId") if isinstance(resp, dict) else resp.json().get("workoutId")
+    # Достаем авторизованную сессию из объекта garmin (для версии 0.3.x)
+    session = getattr(garmin, "session", None)
+    if not session:
+        raise Exception("Сессия Garmin не найдена. Возможно, библиотека устарела.")
+        
+    # Формируем заголовки. Обязательно добавляем DI-Backend, который требует Garmin.
+    headers = {}
+    if hasattr(garmin, "headers") and garmin.headers:
+        headers.update(garmin.headers)
+    headers["DI-Backend"] = "connectapi.garmin.com"
     
+    # Делаем прямой POST-запрос через авторизованную сессию
+    resp = session.post(url, headers=headers, json=workout_json)
+    
+    if resp.status_code not in [200, 201, 204]:
+        raise Exception(f"Ошибка сохранения (Код {resp.status_code}): {resp.text}")
+        
+    workout_id = resp.json().get("workoutId")
+    
+    # Если указана дата, сразу ставим тренировку в календарь
     if scheduled_date and workout_id:
-        # Прямым запросом ставим тренировку в календарь
-        garth.client.post("connectapi", f"/workout-service/schedule/{workout_id}", json={"date": scheduled_date})
+        schedule_url = f"https://connectapi.garmin.com/workout-service/schedule/{workout_id}"
+        session.post(schedule_url, headers=headers, json={"date": scheduled_date})
         
     return workout_id
 
