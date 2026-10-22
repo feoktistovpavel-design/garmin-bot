@@ -40,23 +40,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Привет! Я готов. Надиктуй беговую тренировку голосом или напиши текстом.")
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status_msg = await update.message.reply_text("⏳ Анализирую запрос...")
+    # Если бот дошел до сюда, значит он жив и слышит Telegram
+    status_msg = await update.message.reply_text("1️⃣ Получил сообщение! Инициализирую нейросеть...")
     
     try:
-        # 1. Инициализируем парсер AI
         ai = AIParser(api_key=GEMINI_API_KEY)
         
-        # 2. Получаем структуру тренировки от Gemini
         if update.message.voice:
+            await status_msg.edit_text("2️⃣ Скачиваю аудиофайл с серверов Telegram...")
             file = await context.bot.get_file(update.message.voice.file_id)
             voice_path = "temp_voice.ogg"
             await file.download_to_drive(voice_path)
             
+            await status_msg.edit_text("3️⃣ Отправил аудио в Gemini, жду ответ (это может занять пару секунд)...")
             parsed_result = ai.parse_audio(voice_path)
-            os.remove(voice_path)  # Удаляем локальный файл
-            await status_msg.edit_text("🗣 Голос распознан! Собираю структуру...")
+            os.remove(voice_path)
         else:
+            await status_msg.edit_text("2️⃣ Отправил текст в Gemini, жду ответ...")
             parsed_result = ai.parse_text(update.message.text)
+            
+        await status_msg.edit_text(f"4️⃣ Нейросеть ответила! Собираю JSON для Garmin...\nНазвание: {parsed_result.get('workoutName')}")
+        
+        scheduled_date = parsed_result.get("scheduledDate")
+        garmin_payload = build_garmin_workout(parsed_result)
+        
+        await status_msg.edit_text("5️⃣ Стучусь в Garmin (SSO-авторизация)...")
+        client = GarminClient(username=GARMIN_EMAIL, password=GARMIN_PASSWORD)
+        client.login()
+        
+        await status_msg.edit_text("6️⃣ Авторизация успешна! Отправляю тренировку на сервер...")
+        workout_id = client.save_workout(garmin_payload)
+        
+        reply_text = f"✅ Тренировка «{parsed_result.get('workoutName')}» успешно создана!"
+        
+        if scheduled_date and workout_id:
+            await status_msg.edit_text(f"7️⃣ Тренировка сохранена. Добавляю в календарь на {scheduled_date}...")
+            client.schedule_workout(workout_id, scheduled_date)
+            reply_text += f"\n📅 Добавлена в календарь на: **{scheduled_date}**"
+            
+        await status_msg.edit_text(reply_text, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Ошибка в процессе обработки: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ Застрял на текущем шаге. Текст ошибки:\n`{str(e)}`", parse_mode="Markdown")
             
         # 3. Собираем JSON для Garmin
         scheduled_date = parsed_result.get("scheduledDate")
