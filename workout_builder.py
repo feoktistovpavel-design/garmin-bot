@@ -7,13 +7,16 @@ def build_garmin_workout(parsed_json):
     Преобразует простой словарь от Gemini в сложную структуру Garmin JSON,
     опираясь на логику правильных DTO-шагов.
     """
+# Внутренние идентификаторы Garmin для бега
+    running_sport = {"sportTypeId": 1, "sportTypeKey": "running"}
+    
     workout = {
-        "sport": "RUNNING",
         "workoutName": parsed_json.get("workoutName", "Тренировка"),
+        "sportType": running_sport,
         "workoutSegments": [
             {
                 "segmentOrder": 1, 
-                "sport": "RUNNING", 
+                "sportType": running_sport, 
                 "workoutSteps": []
             }
         ]
